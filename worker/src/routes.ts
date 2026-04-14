@@ -11,10 +11,54 @@ import {
   getAttachments,
   getAttachment
 } from './database';
-import { generateRandomAddress, } from './utils';
+import { formatDateTime, generateId, generateRandomAddress } from './utils';
 
 // 创建 Hono 应用
 const app = new Hono<{ Bindings: Env }>();
+
+function resolveConfiguredDomains(env: Env): string[] {
+  const raw = String(env.VITE_EMAIL_DOMAIN || '').trim();
+  if (!raw) return [];
+  return raw
+    .split(',')
+    .map((domain) => domain.trim().replace(/^@+/, '').toLowerCase())
+    .filter(Boolean);
+}
+
+function buildMailboxAddress(name: string, requestedDomain: string, env: Env): string {
+  const localPart = String(name || '').trim() || generateRandomAddress();
+  const configuredDomains = resolveConfiguredDomains(env);
+  const normalizedRequestedDomain = String(requestedDomain || '')
+    .trim()
+    .replace(/^@+/, '')
+    .toLowerCase();
+
+  const domain = normalizedRequestedDomain || configuredDomains[0] || '';
+  if (!domain) {
+    throw new Error('No mailbox domain configured');
+  }
+  return `${localPart}@${domain}`;
+}
+
+function toLegacyAdminMail(email: Awaited<ReturnType<typeof getEmail>>) {
+  const receivedAt = email?.receivedAt || 0;
+  const raw = [
+    email?.subject ? `Subject: ${email.subject}` : '',
+    email?.textContent || '',
+    email?.htmlContent || '',
+  ]
+    .filter(Boolean)
+    .join('\n\n');
+
+  return {
+    id: String(email?.id || ''),
+    subject: String(email?.subject || ''),
+    raw,
+    created_at: formatDateTime(receivedAt).replace('T', ' ').replace('Z', ''),
+    from: String(email?.fromAddress || ''),
+    to: String(email?.toAddress || ''),
+  };
+}
 
 // 添加 CORS 中间件
 app.use('/*', cors({
@@ -47,6 +91,98 @@ app.get('/api/config', (c) => {
       success: false, 
       error: '获取配置失败',
       message: error instanceof Error ? error.message : String(error)
+    }, 500);
+  }
+});
+
+// 兼容旧版 CFWorker API：创建邮箱
+app.post('/admin/new_address', async (c) => {
+  try {
+    const body = await c.req.json().catch(() => ({} as Record<string, unknown>));
+    const address = buildMailboxAddress(
+      String(body.name || ''),
+      String(body.domain || ''),
+      c.env,
+    );
+    const existingMailbox = await getMailbox(c.env.DB, address);
+
+    if (existingMailbox) {
+      return c.json({
+        error: 'address_exists',
+        message: '邮箱地址已存在',
+      }, 409);
+    }
+
+    const ip = c.req.header('CF-Connecting-IP') || 'unknown';
+    const mailbox = await createMailbox(c.env.DB, {
+      address,
+      expiresInHours: 24,
+      ipAddress: ip,
+    });
+    const token = generateId();
+
+    return c.json({
+      address: mailbox.address,
+      email: mailbox.address,
+      token,
+      jwt: token,
+      created_at: formatDateTime(mailbox.createdAt).replace('T', ' ').replace('Z', ''),
+      expires_at: formatDateTime(mailbox.expiresAt).replace('T', ' ').replace('Z', ''),
+    });
+  } catch (error) {
+    console.error('兼容接口 /admin/new_address 失败:', error);
+    return c.json({
+      error: 'create_address_failed',
+      message: error instanceof Error ? error.message : String(error),
+    }, 400);
+  }
+});
+
+// 兼容旧版 CFWorker API：拉取邮件列表
+app.get('/admin/mails', async (c) => {
+  try {
+    const address = String(c.req.query('address') || '').trim();
+    const limit = Math.max(Number(c.req.query('limit') || 20) || 20, 1);
+    const offset = Math.max(Number(c.req.query('offset') || 0) || 0, 0);
+
+    if (!address) {
+      return c.json({
+        error: 'missing_address',
+        message: 'address is required',
+      }, 400);
+    }
+
+    const mailbox = await getMailbox(c.env.DB, address);
+    if (!mailbox) {
+      return c.json({
+        results: [],
+        total: 0,
+        limit,
+        offset,
+      });
+    }
+
+    const emails = await getEmails(c.env.DB, mailbox.id);
+    const paged = emails.slice(offset, offset + limit);
+    const results = [];
+
+    for (const item of paged) {
+      const detail = await getEmail(c.env.DB, item.id);
+      if (!detail) continue;
+      results.push(toLegacyAdminMail(detail));
+    }
+
+    return c.json({
+      results,
+      total: emails.length,
+      limit,
+      offset,
+    });
+  } catch (error) {
+    console.error('兼容接口 /admin/mails 失败:', error);
+    return c.json({
+      error: 'list_mails_failed',
+      message: error instanceof Error ? error.message : String(error),
     }, 500);
   }
 });
