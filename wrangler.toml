@@ -11,7 +11,7 @@ keep_vars = true
 [[d1_databases]]
 binding = "DB"
 database_name = "name"  # 替换为您的实际的数据库 NAME
-database_id = "b90f13e246ed31752587d9c9e8eb8d98"  # 需要替换为您的实际数据库 ID
+database_id = "91cbbe94-5e5d-4b45-b36b-314e9d3e0e2f"  # 需要替换为您的实际数据库 ID
 
 # 设置域名
 [vars]
