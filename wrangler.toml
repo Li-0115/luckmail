@@ -1,4 +1,4 @@
-name = "luckmail"
+name = "youxiang"
 main = "worker/src/index.ts"
 
 # 打包配置
